@@ -11,10 +11,31 @@ import json
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from uuid import uuid4
+
+try:
+    from langchain.tools import StructuredTool
+except Exception:
+    from langchain.tools import BaseTool
+
+    class _SimpleTool(BaseTool):
+        def __init__(self, func, name, description, args_schema=None):
+            super().__init__(name=name, description=description, args_schema=args_schema)
+            self.func = func
+
+        def _run(self, *args, **kwargs):
+            return self.func(*args, **kwargs)
+
+        async def _arun(self, *args, **kwargs):
+            return self.func(*args, **kwargs)
+
+    class StructuredTool:
+        @staticmethod
+        def from_function(func, name, description, args_schema=None):
+            return _SimpleTool(func=func, name=name, description=description, args_schema=args_schema)
 
 import boto3
 from botocore.exceptions import ClientError
-from langchain.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 
@@ -59,6 +80,10 @@ class CloudControlInput(BaseModel):
         default="us-east-1",
         description="AWS region"
     )
+    approved: bool = Field(
+        default=False,
+        description="Set to true when the delete operation has been explicitly approved by a user."
+    )
 
 
 def _aws_cloud_control_impl(
@@ -67,6 +92,7 @@ def _aws_cloud_control_impl(
     identifier: str = "",
     properties: Optional[dict] = None,
     region: str = "us-east-1",
+    approved: bool = False,
 ) -> str:
     """
     Execute ANY AWS resource operation using the Cloud Control API.
@@ -220,6 +246,17 @@ def _aws_cloud_control_impl(
         elif operation == "delete":
             if not identifier:
                 return json.dumps({"status": "error", "message": "identifier is required for delete"})
+
+            if not approved:
+                return json.dumps({
+                    "status": "pending_approval",
+                    "operation": "delete",
+                    "resource_type": resource_type,
+                    "identifier": identifier,
+                    "region": region,
+                    "message": "Delete operations require explicit user approval before execution.",
+                    "approval_required": True,
+                })
 
             resp = client.delete_resource(
                 TypeName=resource_type,
@@ -489,3 +526,6 @@ ALL_TOOLS = [
     cloudwatch_logs,
     final_answer,
 ]
+
+# Export helper for backend approval execution
+execute_aws_cloud_control = _aws_cloud_control_impl

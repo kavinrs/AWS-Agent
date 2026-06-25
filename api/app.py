@@ -1,10 +1,12 @@
 """
 FastAPI server — exposes the AWS Agent via REST API.
 """
+from datetime import datetime
+from typing import Any, Dict, Optional
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Any
 import time
 import json
 
@@ -64,6 +66,18 @@ class ChatResponse(BaseModel):
     response: str
     steps: list[ToolStep]
     duration_ms: int
+    approval_required: bool = False
+    approval_id: Optional[str] = None
+    approval_message: Optional[str] = None
+
+
+class ApprovalRequest(BaseModel):
+    approval_id: str
+    tool: str
+    tool_input: Any
+    status: str
+    created_at: str
+    message: str
 
 
 def format_observation(obs_str: str) -> str:
@@ -148,6 +162,33 @@ def root():
 def health():
     return {"status": "healthy"}
 
+approval_requests: Dict[str, ApprovalRequest] = {}
+
+
+def _find_pending_approval(request_text: str) -> Optional[ApprovalRequest]:
+    if not request_text:
+        return None
+
+    normalized = request_text.strip().lower()
+    if normalized.startswith("/approve"):
+        parts = normalized.split()
+        if len(parts) >= 2:
+            return approval_requests.get(parts[1])
+
+    pending = [req for req in approval_requests.values() if req.status == "pending"]
+    if len(pending) == 1:
+        return pending[0]
+
+    if "approve" in normalized:
+        for req in pending:
+            tool_input = req.tool_input
+            if isinstance(tool_input, dict):
+                identifier = str(tool_input.get("identifier", "")).lower()
+                if identifier and identifier in normalized:
+                    return req
+
+    return None
+
 
 @app.get("/tools", tags=["Agent"])
 def list_tools():
@@ -172,34 +213,133 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
     start = time.time()
+    pending_request = _find_pending_approval(request.message)
+    if pending_request is not None:
+        from LangChainAgent.tools.tools import execute_aws_cloud_control
+
+        approved_tool_input = pending_request.tool_input
+        if not isinstance(approved_tool_input, dict):
+            try:
+                approved_tool_input = json.loads(approved_tool_input)
+            except Exception:
+                approved_tool_input = {}
+
+        approved_tool_input["approved"] = True
+
+        try:
+            tool_result = execute_aws_cloud_control(
+                operation=approved_tool_input.get("operation", ""),
+                resource_type=approved_tool_input.get("resource_type", ""),
+                identifier=approved_tool_input.get("identifier", ""),
+                properties=approved_tool_input.get("properties", None),
+                region=approved_tool_input.get("region", "us-east-1"),
+                approved=True,
+            )
+        except Exception as e:
+            pending_request.status = "failed"
+            raise HTTPException(status_code=500, detail=f"Approval execution failed: {str(e)}")
+
+        pending_request.status = "approved"
+        duration_ms = int((time.time() - start) * 1000)
+
+        observation = tool_result if isinstance(tool_result, str) else json.dumps(tool_result)
+        formatted_obs = format_observation(observation)
+
+        return ChatResponse(
+            message=request.message,
+            response=f"Deletion approved and executed for {approved_tool_input.get('identifier', '')}.",
+            steps=[ToolStep(
+                tool=pending_request.tool,
+                tool_input=approved_tool_input,
+                observation=formatted_obs,
+            )],
+            duration_ms=duration_ms,
+        )
+
+    start = time.time()
     try:
         executor = CustomAgentExecuter(max_iterations=4)
-        
-        # # Add chat history to executor
-        # if request.chat_history:
-        #     for msg in request.chat_history:
-        #         if msg["role"] == "user":
-        #             executor.chat_history.append(HumanMessage(content=msg["content"]))
-        #         elif msg["role"] == "assistant":
-        #             executor.chat_history.append(AIMessage(content=msg["content"]))
-        
+
         result = executor.invoke(request.message)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
 
     duration_ms = int((time.time() - start) * 1000)
-    
+
     # Format steps with nicely formatted observations
     formatted_steps = []
     for s in result["steps"]:
         step = ToolStep(**s)
-        # Format the observation for better readability
         step.observation = format_observation(step.observation)
         formatted_steps.append(step)
+
+    approval_required = False
+    approval_id = None
+    approval_message = None
+
+    if result.get("pending_approval"):
+        pending = result["pending_approval"]
+        approval_id = pending["approval_id"]
+        approval_required = True
+        approval_message = pending.get("message", "Approval required")
+
+        approval_requests[approval_id] = ApprovalRequest(
+            approval_id=approval_id,
+            tool=pending["tool_name"],
+            tool_input=pending["tool_input"],
+            status="pending",
+            created_at=datetime.utcnow().isoformat() + "Z",
+            message=approval_message,
+        )
 
     return ChatResponse(
         message=request.message,
         response=result["output"],
         steps=formatted_steps,
         duration_ms=duration_ms,
+        approval_required=approval_required,
+        approval_id=approval_id,
+        approval_message=approval_message,
     )
+
+
+@app.post("/approve/{approval_id}", tags=["Approval"])
+def approve(approval_id: str):
+    request_record = approval_requests.get(approval_id)
+    if request_record is None:
+        raise HTTPException(status_code=404, detail="Approval request not found.")
+
+    if request_record.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Approval request is already {request_record.status}.")
+
+    from LangChainAgent.tools.tools import execute_aws_cloud_control
+
+    approved_tool_input = request_record.tool_input
+    if not isinstance(approved_tool_input, dict):
+        try:
+            approved_tool_input = json.loads(approved_tool_input)
+        except Exception:
+            approved_tool_input = {}
+
+    approved_tool_input["approved"] = True
+
+    try:
+        tool_result = execute_aws_cloud_control(
+            operation=approved_tool_input.get("operation", ""),
+            resource_type=approved_tool_input.get("resource_type", ""),
+            identifier=approved_tool_input.get("identifier", ""),
+            properties=approved_tool_input.get("properties", None),
+            region=approved_tool_input.get("region", "us-east-1"),
+            approved=True,
+        )
+    except Exception as e:
+        request_record.status = "failed"
+        raise HTTPException(status_code=500, detail=f"Approval execution failed: {str(e)}")
+
+    request_record.status = "approved"
+
+    return {
+        "approval_id": approval_id,
+        "status": "approved",
+        "result": json.loads(tool_result) if isinstance(tool_result, str) else tool_result,
+    }

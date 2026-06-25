@@ -279,7 +279,10 @@ function App() {
         role: 'assistant',
         content: data.response,
         steps: data.steps,
-        duration: data.duration_ms
+        duration: data.duration_ms,
+        approval_required: data.approval_required,
+        approval_id: data.approval_id,
+        approval_message: data.approval_message,
       }])
     } catch (error) {
       setMessages(prev => [...prev, {
@@ -289,6 +292,32 @@ function App() {
       }])
     } finally {
       setLoading(false)
+    }
+  }
+
+  const approveDeletion = async (approvalId) => {
+    try {
+      const response = await fetch(`${API_URL}/approve/${approvalId}`, {
+        method: 'POST',
+      })
+
+      if (!response.ok) {
+        const errText = await response.text()
+        throw new Error(`Approval failed: ${response.status} ${errText}`)
+      }
+
+      const data = await response.json()
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `Deletion approved and executed. Result: ${JSON.stringify(data.result)}`,
+        steps: [],
+      }])
+    } catch (error) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `Approval error: ${error.message}`,
+        error: true,
+      }])
     }
   }
 
@@ -406,6 +435,19 @@ function App() {
                               </div>
                             ))}
                           </details>
+                        )}
+                        {msg.approval_required && msg.approval_id && (
+                          <div className="approval-card">
+                            <div className="approval-message">
+                              <strong>Approval required:</strong> {msg.approval_message || 'Confirmation needed before delete'}
+                            </div>
+                            <button
+                              className="approve-button"
+                              onClick={() => approveDeletion(msg.approval_id)}
+                            >
+                              Approve deletion
+                            </button>
+                          </div>
                         )}
                         {msg.duration && (
                           <div className="duration">⏱️ {msg.duration}ms</div>

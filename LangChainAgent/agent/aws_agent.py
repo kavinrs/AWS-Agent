@@ -3,16 +3,27 @@ AWS Agent — LangChain ReAct agent with 2 powerful generic tools.
 """
 import os
 from pathlib import Path
+from uuid import uuid4
 from dotenv import load_dotenv
-from langchain.agents import AgentExecutor, create_openai_functions_agent
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage,ToolMessage,HumanMessage,AIMessage
+from langchain_core.messages import BaseMessage, ToolMessage, HumanMessage, AIMessage
 from LangChainAgent.tools import ALL_TOOLS
 from langchain_core.runnables import RunnableSerializable
 import json
 
-env_path = Path(__file__).parent.parent / ".env"
+# Find a .env file by walking up parent directories (allows project-root .env)
+env_path = None
+for p in Path(__file__).resolve().parents:
+    candidate = p / ".env"
+    if candidate.exists():
+        env_path = candidate
+        break
+
+if env_path is None:
+    # fallback to the original location
+    env_path = Path(__file__).parent.parent / ".env"
+
 load_dotenv(dotenv_path=env_path)
 
 SYSTEM_MESSAGE = """You are an expert AWS Resource Manager AI Agent.
@@ -107,59 +118,108 @@ class CustomAgentExecuter:
         | llm_openai.bind_tools(ALL_TOOLS,tool_choice="any")
         )
     
-    def invoke(self,query:str)->dict:
-        agent_scratchpad=[]
-        count=0
-        steps=[]
+    def invoke(self, query: str) -> dict:
+        agent_scratchpad = []
+        count = 0
+        steps = []
         final_answer_text = None
-        
-        while count<self.max_iterations:
-            toolcall=self.agent.invoke({
-                "input":query,
-                "chat_history":self.chat_history,
-                "agent_scratchpad":agent_scratchpad
-            }
-            )
+
+        while count < self.max_iterations:
+            toolcall = self.agent.invoke({
+                "input": query,
+                "chat_history": self.chat_history,
+                "agent_scratchpad": agent_scratchpad,
+            })
 
             agent_scratchpad.append(toolcall)
 
-            tool_name=toolcall.tool_calls[0]["name"]
+            tool_name = toolcall.tool_calls[0]["name"]
             tool_args = toolcall.tool_calls[0]["args"]
             tool_call_id = toolcall.tool_calls[0]["id"]
 
-            tool_obs=name2tool[tool_name](**tool_args)
+            # Intercept delete operations and require explicit approval before executing.
+            if (
+                tool_name == "aws_cloud_control"
+                and isinstance(tool_args, dict)
+                and tool_args.get("operation", "").lower().strip() == "delete"
+            ):
+                approval_id = str(uuid4())
+                pending_tool_input = dict(tool_args)
+                pending_tool_input.pop("approved", None)
 
-            tool_exec=ToolMessage(
+                pending_obs = json.dumps({
+                    "status": "pending_approval",
+                    "operation": "delete",
+                    "resource_type": tool_args.get("resource_type", ""),
+                    "identifier": tool_args.get("identifier", ""),
+                    "region": tool_args.get("region", "us-east-1"),
+                    "message": "Delete operations require explicit user approval before execution.",
+                    "approval_required": True,
+                    "approval_id": approval_id,
+                    "tool_name": tool_name,
+                    "tool_input": pending_tool_input,
+                })
+
+                tool_exec = ToolMessage(
+                    content=pending_obs,
+                    tool_call_id=tool_call_id,
+                )
+                agent_scratchpad.append(tool_exec)
+
+                steps.append({
+                    "tool": tool_name,
+                    "tool_input": tool_args,
+                    "observation": pending_obs,
+                })
+
+                final_answer_text = (
+                    "This delete operation is pending approval. "
+                    "Approve it with the /approve endpoint before the delete will execute."
+                )
+                return {
+                    "output": final_answer_text,
+                    "steps": steps,
+                    "pending_approval": {
+                        "approval_id": approval_id,
+                        "tool_name": tool_name,
+                        "tool_input": tool_args,
+                        "message": "Delete operations require explicit user approval before execution.",
+                    },
+                }
+
+            tool_obs = name2tool[tool_name](**tool_args)
+
+            tool_exec = ToolMessage(
                 content=f"{tool_obs}",
-                tool_call_id=tool_call_id
+                tool_call_id=tool_call_id,
             )
 
             agent_scratchpad.append(tool_exec)
 
             print(f"{count}: {tool_name}({tool_args})")
-            
+
             steps.append({
                 "tool": tool_name,
                 "tool_input": tool_args,
                 "observation": tool_obs,
             })
 
-            if tool_name=="final_answer":
+            if tool_name == "final_answer":
                 try:
                     final_answer_dict = json.loads(tool_obs)
                     final_answer_text = final_answer_dict.get("answer", tool_obs)
-                except:
+                except Exception:
                     final_answer_text = tool_obs
                 break
-            
+
             count += 1
-        
+
         if final_answer_text is None:
             final_answer_text = "Task completed without final answer."
-            
+
         self.chat_history.extend([
             HumanMessage(content=query),
-            AIMessage(content=final_answer_text)
+            AIMessage(content=final_answer_text),
         ])
 
         return {"output": final_answer_text, "steps": steps}
