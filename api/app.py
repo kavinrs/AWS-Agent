@@ -7,10 +7,12 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+import os
 import time
 import json
 
 from LangChainAgent.agent.aws_agent import CustomAgentExecuter
+from LangChainAgent.rag.retriever import get_or_create_retriever
 from langchain_core.messages import HumanMessage, AIMessage
 
 
@@ -27,6 +29,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def build_rag_index_on_startup():
+    """Build or load the RAG FAISS index when the application starts."""
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        return
+
+    try:
+        get_or_create_retriever(openai_api_key)
+    except Exception:
+        # If RAG fails, continue starting the app without breaking the API.
+        pass
 
 
 class ChatRequest(BaseModel):

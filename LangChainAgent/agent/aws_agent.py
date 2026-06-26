@@ -9,6 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, ToolMessage, HumanMessage, AIMessage
 from LangChainAgent.tools import ALL_TOOLS
+from LangChainAgent.rag.retriever import retrieve_company_context
 from langchain_core.runnables import RunnableSerializable
 import json
 
@@ -103,6 +104,18 @@ prompt = ChatPromptTemplate.from_messages([
 ])
 
 name2tool = {tool.name: tool.func for tool in ALL_TOOLS}
+
+def build_query_with_company_context(query: str, openai_api_key: str) -> str:
+    """Retrieve relevant company documents and append them to the user query."""
+    context_chunks = retrieve_company_context(query, openai_api_key)
+    if not context_chunks:
+        return query
+
+    joined_context = "\n\n".join(context_chunks)
+    return (
+        f"Company context:\n{joined_context}\n\n"
+        f"User question:\n{query}"
+    )
 class CustomAgentExecuter:
     chat_history:list[BaseMessage]
 
@@ -124,9 +137,11 @@ class CustomAgentExecuter:
         steps = []
         final_answer_text = None
 
+        augmented_query = build_query_with_company_context(query, api_key)
+
         while count < self.max_iterations:
             toolcall = self.agent.invoke({
-                "input": query,
+                "input": augmented_query,
                 "chat_history": self.chat_history,
                 "agent_scratchpad": agent_scratchpad,
             })

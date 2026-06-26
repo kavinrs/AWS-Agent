@@ -38,6 +38,9 @@ import boto3
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field
 
+from .ec2_tool import ec2_tool
+from .rds_tool import rds_tool
+
 
 def get_cc_client(region: str = "us-east-1"):
     """Create and return a CloudControl API client."""
@@ -523,6 +526,8 @@ final_answer = StructuredTool.from_function(
 
 ALL_TOOLS = [
     aws_cloud_control,
+    ec2_tool,
+    rds_tool,
     cloudwatch_logs,
     final_answer,
 ]
