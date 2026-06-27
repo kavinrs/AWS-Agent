@@ -1,7 +1,45 @@
-import { useState, useEffect, useRef } from 'react'
-import './App.css'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChatInput } from './components/ChatInput'
+import { ChatWindow } from './components/ChatWindow'
+import { Header } from './components/Header'
+import { Sidebar } from './components/Sidebar'
+import { WelcomeScreen } from './components/WelcomeScreen'
 
 const API_URL = 'http://localhost:8000'
+const STORAGE_KEY_SESSIONS = 'aws-agent-sessions'
+const STORAGE_KEY_ACTIVE_SESSION = 'aws-agent-active-session'
+
+function createSession(messages = []) {
+  const firstUserPrompt = messages.find((item) => item.role === 'user')?.content || 'New conversation'
+
+  return {
+    id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: firstUserPrompt.slice(0, 40),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    messages,
+  }
+}
+
+function loadStoredSessions() {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY_SESSIONS)
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch (error) {
+    console.error('Failed to load sessions from storage:', error)
+    return null
+  }
+}
+
+function loadStoredActiveSessionId() {
+  try {
+    return window.localStorage.getItem(STORAGE_KEY_ACTIVE_SESSION)
+  } catch (error) {
+    console.error('Failed to load active session id from storage:', error)
+    return null
+  }
+}
 
 function App() {
   const [messages, setMessages] = useState([])
@@ -9,265 +47,123 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [tools, setTools] = useState([])
   const [showTools, setShowTools] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [darkMode, setDarkMode] = useState(true)
+  const [sessions, setSessions] = useState([])
+  const [activeSessionId, setActiveSessionId] = useState(null)
   const messagesEndRef = useRef(null)
 
-  // Parse and render markdown to React elements
-  const parseMarkdown = (text) => {
-    if (!text) return null
-
-    const elements = []
-    let key = 0
-
-    // Split by headers (###, ##, #)
-    const lines = text.split('\n')
-    let currentBlock = []
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-
-      // Handle headers
-      if (line.startsWith('###')) {
-        if (currentBlock.length > 0) {
-          elements.push(parseBlock(currentBlock.join('\n'), key++))
-          currentBlock = []
-        }
-        const headerText = line.replace(/^#+\s*/, '').trim()
-        elements.push(
-          <h3 key={key++} className="markdown-h3">{headerText}</h3>
-        )
-      } else if (line.startsWith('##')) {
-        if (currentBlock.length > 0) {
-          elements.push(parseBlock(currentBlock.join('\n'), key++))
-          currentBlock = []
-        }
-        const headerText = line.replace(/^#+\s*/, '').trim()
-        elements.push(
-          <h2 key={key++} className="markdown-h2">{headerText}</h2>
-        )
-      } else if (line.startsWith('#')) {
-        if (currentBlock.length > 0) {
-          elements.push(parseBlock(currentBlock.join('\n'), key++))
-          currentBlock = []
-        }
-        const headerText = line.replace(/^#+\s*/, '').trim()
-        elements.push(
-          <h1 key={key++} className="markdown-h1">{headerText}</h1>
-        )
-      } else if (line.trim() === '') {
-        if (currentBlock.length > 0) {
-          elements.push(parseBlock(currentBlock.join('\n'), key++))
-          currentBlock = []
-        }
-      } else {
-        currentBlock.push(line)
-      }
-    }
-
-    if (currentBlock.length > 0) {
-      elements.push(parseBlock(currentBlock.join('\n'), key++))
-    }
-
-    return <div className="markdown-content">{elements}</div>
-  }
-
-  // Parse a block of text with inline formatting
-  const parseBlock = (block, key) => {
-    if (!block.trim()) return null
-
-    // Check if it's a numbered list
-    if (/^\d+\.\s/.test(block.trim())) {
-      // Split by numbered items and process each one
-      const numberedItems = block.split(/\n(?=\d+\.\s)/)
-      if (numberedItems.length > 1) {
-        // Multiple numbered items - render each separately
-        return (
-          <div key={key}>
-            {numberedItems.map((item, idx) => parseListItem(item, `${key}-${idx}`))}
-          </div>
-        )
-      }
-      return parseListItem(block, key)
-    }
-
-    // Check if it's a bullet list
-    if (block.trim().startsWith('•') || block.trim().startsWith('-')) {
-      return parseBulletItem(block, key)
-    }
-
-    // Regular paragraph with inline formatting
-    return (
-      <p key={key} className="markdown-p">
-        {renderInlineMarkdown(block)}
-      </p>
-    )
-  }
-
-  // Render inline markdown (bold, formatting)
-  const renderInlineMarkdown = (text) => {
-    const elements = []
-    let lastIndex = 0
-
-    // Pattern for **bold** and other inline formatting
-    const regex = /\*\*([^*]+)\*\*|`([^`]+)`/g
-    let match
-
-    while ((match = regex.exec(text)) !== null) {
-      // Add text before match
-      if (match.index > lastIndex) {
-        elements.push(text.substring(lastIndex, match.index))
-      }
-
-      // Add formatted text
-      if (match[1]) {
-        // Bold text
-        elements.push(
-          <strong key={`bold-${match.index}`}>{match[1]}</strong>
-        )
-      } else if (match[2]) {
-        // Code text
-        elements.push(
-          <code key={`code-${match.index}`}>{match[2]}</code>
-        )
-      }
-
-      lastIndex = regex.lastIndex
-    }
-
-    // Add remaining text
-    if (lastIndex < text.length) {
-      elements.push(text.substring(lastIndex))
-    }
-
-    return elements.length > 0 ? elements : text
-  }
-
-  // Parse numbered list item
-  const parseListItem = (text, key) => {
-    const match = text.match(/^(\d+)\.\s+(.*)/)
-    if (!match) return <div key={key}>{text}</div>
-
-    const number = match[1]
-    const content = match[2]
-
-    // Parse key-value pairs separated by " - "
-    const properties = []
-    const parts = content.split(' - ')
-
-    for (const part of parts) {
-      const kv = part.match(/\*\*([^*]+):\*\*\s*(.+)/)
-      if (kv) {
-        properties.push({
-          key: kv[1].trim(),
-          value: kv[2].trim()
-        })
-      }
-    }
-
-    if (properties.length > 1) {
-      // Multiple properties - make it expandable but OPEN by default
-      const mainProp = properties[0]
-      return (
-        <details key={key} className="resource-details" open>
-          <summary className="resource-summary">
-            <span className="resource-number">{number}.</span>
-            <strong>{mainProp.key}:</strong>
-            <span className="resource-main-value">{mainProp.value}</span>
-            <span className="expand-icon">▼</span>
-          </summary>
-          <div className="resource-properties">
-            {properties.map((prop, idx) => (
-              <div key={idx} className="resource-property">
-                <span className="prop-key">{prop.key}:</span>
-                <span className="prop-value">{prop.value}</span>
-              </div>
-            ))}
-          </div>
-        </details>
-      )
-    } else if (properties.length === 1) {
-      // Single property
-      return (
-        <div key={key} className="resource-item">
-          <span className="resource-number">{number}.</span>
-          <strong>{properties[0].key}:</strong>
-          <span className="resource-main-value">{properties[0].value}</span>
-        </div>
-      )
-    }
-
-    return (
-      <div key={key} className="markdown-li">
-        <span className="list-marker">{number}.</span>
-        <span>{renderInlineMarkdown(content)}</span>
-      </div>
-    )
-  }
-
-  // Parse bullet item
-  const parseBulletItem = (text, key) => {
-    const content = text.replace(/^[•-]\s*/, '').trim()
-    return (
-      <div key={key} className="markdown-li bullet">
-        <span className="list-marker">•</span>
-        <span>{renderInlineMarkdown(content)}</span>
-      </div>
-    )
-  }
-
-  // Format response text with proper structure
-  const formatResponse = (text) => {
-    if (!text) return null
-    return parseMarkdown(text)
-  }
-
   useEffect(() => {
-    // Fetch available tools on mount
     fetch(`${API_URL}/tools`)
-      .then(res => res.json())
-      .then(data => setTools(data.tools || []))
-      .catch(err => console.error('Failed to fetch tools:', err))
+      .then((res) => res.json())
+      .then((data) => setTools(data.tools || []))
+      .catch((error) => console.error('Failed to fetch tools:', error))
   }, [])
 
   useEffect(() => {
-    // Auto-scroll to bottom when messages change
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    const storedSessions = loadStoredSessions()
+    const storedActiveSessionId = loadStoredActiveSessionId()
 
-  const sendMessage = async (e) => {
-    e.preventDefault()
+    if (storedSessions?.length > 0) {
+      setSessions(storedSessions)
+      if (storedActiveSessionId && storedSessions.some((session) => session.id === storedActiveSessionId)) {
+        setActiveSessionId(storedActiveSessionId)
+        const selectedSession = storedSessions.find((session) => session.id === storedActiveSessionId)
+        setMessages(selectedSession?.messages || [])
+        return
+      }
+
+      const firstSession = storedSessions[0]
+      setActiveSessionId(firstSession.id)
+      setMessages(firstSession.messages || [])
+      return
+    }
+
+    const initialSession = createSession([])
+    setSessions([initialSession])
+    setActiveSessionId(initialSession.id)
+    setMessages([])
+  }, [])
+
+  useEffect(() => {
+    if (!activeSessionId) return
+
+    try {
+      window.localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(sessions))
+      window.localStorage.setItem(STORAGE_KEY_ACTIVE_SESSION, activeSessionId)
+    } catch (error) {
+      console.error('Failed to save sessions to storage:', error)
+    }
+  }, [sessions, activeSessionId])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, loading])
+
+  const persistSession = (nextMessages, titleOverride) => {
+    if (!activeSessionId) return
+
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === activeSessionId
+          ? {
+              ...session,
+              messages: nextMessages,
+              title: titleOverride || session.title || 'New conversation',
+              updatedAt: new Date().toISOString(),
+            }
+          : session,
+      ),
+    )
+  }
+
+  const handleNewChat = () => {
+    if (activeSessionId) {
+      persistSession(messages)
+    }
+
+    const freshSession = createSession([])
+    setSessions((prev) => [freshSession, ...prev.filter((session) => session.id !== freshSession.id)])
+    setActiveSessionId(freshSession.id)
+    setMessages([])
+    setInput('')
+  }
+
+  const handleSelectSession = (sessionId) => {
+    const selectedSession = sessions.find((session) => session.id === sessionId)
+    if (!selectedSession) return
+
+    setActiveSessionId(sessionId)
+    setMessages(selectedSession.messages || [])
+    setInput('')
+  }
+
+  const sendMessage = async (event) => {
+    event.preventDefault()
     if (!input.trim() || loading) return
 
     const userMessage = input.trim()
+    const currentMessages = messages
+    const optimisticMessages = [...currentMessages, { role: 'user', content: userMessage }]
+
     setInput('')
-    
-    // Add user message to state
-    const newMessages = [...messages, { role: 'user', content: userMessage }]
-    setMessages(newMessages)
+    setMessages(optimisticMessages)
+    persistSession(optimisticMessages, userMessage.slice(0, 40))
     setLoading(true)
 
     try {
-      // Prepare chat history (include tool calls for context)
-      const chatHistory = messages.map(msg => {
-        const historyMsg = {
-          role: msg.role,
-          content: msg.content
+      const chatHistory = currentMessages.map((message) => {
+        const historyMessage = { role: message.role, content: message.content }
+        if (message.role === 'assistant' && message.steps?.length > 0) {
+          historyMessage.tool_calls = message.steps
         }
-        
-        // Include tool calls if this is an assistant message
-        if (msg.role === 'assistant' && msg.steps && msg.steps.length > 0) {
-          historyMsg.tool_calls = msg.steps
-        }
-        
-        return historyMsg
+        return historyMessage
       })
 
       const response = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          message: userMessage,
-          chat_history: chatHistory
-        })
+        body: JSON.stringify({ message: userMessage, chat_history: chatHistory }),
       })
 
       if (!response.ok) {
@@ -275,21 +171,29 @@ function App() {
       }
 
       const data = await response.json()
-      setMessages(prev => [...prev, {
+      const assistantMessage = {
         role: 'assistant',
         content: data.response,
-        steps: data.steps,
+        steps: data.steps || [],
         duration: data.duration_ms,
         approval_required: data.approval_required,
         approval_id: data.approval_id,
         approval_message: data.approval_message,
-      }])
+        ragSources: data.rag_sources || [],
+      }
+
+      const nextMessages = [...optimisticMessages, assistantMessage]
+      setMessages(nextMessages)
+      persistSession(nextMessages)
     } catch (error) {
-      setMessages(prev => [...prev, {
+      const fallbackMessage = {
         role: 'assistant',
         content: `Error: ${error.message}. Make sure the backend server is running at ${API_URL}`,
-        error: true
-      }])
+        error: true,
+      }
+      const nextMessages = [...optimisticMessages, fallbackMessage]
+      setMessages(nextMessages)
+      persistSession(nextMessages)
     } finally {
       setLoading(false)
     }
@@ -297,9 +201,7 @@ function App() {
 
   const approveDeletion = async (approvalId) => {
     try {
-      const response = await fetch(`${API_URL}/approve/${approvalId}`, {
-        method: 'POST',
-      })
+      const response = await fetch(`${API_URL}/approve/${approvalId}`, { method: 'POST' })
 
       if (!response.ok) {
         const errText = await response.text()
@@ -307,192 +209,72 @@ function App() {
       }
 
       const data = await response.json()
-      setMessages(prev => [...prev, {
+      const assistantMessage = {
         role: 'assistant',
         content: `Deletion approved and executed. Result: ${JSON.stringify(data.result)}`,
         steps: [],
-      }])
+      }
+      const nextMessages = [...messages, assistantMessage]
+      setMessages(nextMessages)
+      persistSession(nextMessages)
     } catch (error) {
-      setMessages(prev => [...prev, {
+      const fallbackMessage = {
         role: 'assistant',
         content: `Approval error: ${error.message}`,
         error: true,
-      }])
+      }
+      const nextMessages = [...messages, fallbackMessage]
+      setMessages(nextMessages)
+      persistSession(nextMessages)
     }
   }
 
-  const clearChat = () => {
-    setMessages([])
-  }
+  const orderedSessions = useMemo(() => [...sessions].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)), [sessions])
 
   return (
-    <div className="app">
-      {/* Header */}
-      <header className="header">
-        <div className="header-left">
-          <div className="logo">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </div>
-          <div className="header-title">
-            <h1>AWS Agent</h1>
-            <p>S3 • CloudWatch • Cloud Control • Resource Management</p>
-          </div>
-        </div>
-        <div className="header-right">
-          <button className="icon-button" title="Toggle theme">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="5" stroke="currentColor" strokeWidth="2"/>
-              <line x1="12" y1="1" x2="12" y2="3" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="12" y1="21" x2="12" y2="23" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="1" y1="12" x2="3" y2="12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="21" y1="12" x2="23" y2="12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-            </svg>
-          </button>
-          <button className="clear-button" onClick={clearChat}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <rect x="3" y="3" width="18" height="18" rx="2" stroke="currentColor" strokeWidth="2"/>
-            </svg>
-            Clear
-          </button>
-        </div>
-      </header>
+    <div className={`flex min-h-screen flex-col bg-slate-950 text-slate-100 lg:flex-row ${darkMode ? '' : 'bg-stone-50 text-stone-900'}`}>
+      <Sidebar
+        sessions={orderedSessions}
+        activeSessionId={activeSessionId}
+        onNewChat={handleNewChat}
+        onSelectSession={handleSelectSession}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((value) => !value)}
+      />
 
-      {/* Main Content */}
-      <main className="main-content">
-        {messages.length === 0 ? (
-          <div className="welcome-screen">
-            <h2>Welcome to AWS Agent!</h2>
-            <p>Ask me about your AWS resources</p>
-            
-            <button className="tools-toggle" onClick={() => setShowTools(!showTools)}>
-              Available Tools {showTools ? '▲' : '▼'}
-            </button>
+      <div className="flex min-h-screen flex-1 flex-col">
+        <Header
+          darkMode={darkMode}
+          onToggleDarkMode={() => setDarkMode((value) => !value)}
+          connectionStatus="Online"
+          userName="admin"
+        />
 
-            {showTools && (
-              <div className="tools-list">
-                {tools.map((tool, idx) => (
-                  <div key={idx} className="tool-item">
-                    <strong>{tool.name}</strong>
-                    <p>{tool.description}</p>
-                  </div>
-                ))}
-              </div>
-            )}
+        <main className="flex-1 overflow-hidden">
+          {messages.length === 0 ? (
+            <WelcomeScreen
+              onPromptSelect={(prompt) => setInput(prompt)}
+              tools={tools}
+              showTools={showTools}
+              onToggleTools={() => setShowTools((value) => !value)}
+            />
+          ) : (
+            <ChatWindow messages={messages} loading={loading} onApprove={approveDeletion} messagesEndRef={messagesEndRef} />
+          )}
+        </main>
 
-            <div className="example-prompts">
-              <h3>Try asking:</h3>
-              <button onClick={() => setInput("List all my S3 buckets")} className="example-prompt">
-                "List all my S3 buckets"
-              </button>
-              <button onClick={() => setInput("Show my CloudWatch log groups")} className="example-prompt">
-                "Show my CloudWatch log groups"
-              </button>
-              <button onClick={() => setInput("Create an S3 bucket called my-test-bucket-2026")} className="example-prompt">
-                "Create an S3 bucket called my-test-bucket-2026"
-              </button>
-            </div>
+        <footer className="border-t border-slate-800/80 bg-slate-950/90 px-4 py-4 sm:px-6">
+          <div className="mx-auto max-w-7xl">
+            <ChatInput
+              value={input}
+              onChange={setInput}
+              onSubmit={sendMessage}
+              loading={loading}
+              onAttach={() => setShowTools(true)}
+            />
           </div>
-        ) : (
-          <div className="messages-container">
-            {messages.map((msg, idx) => (
-              <div key={idx} className={`message ${msg.role}`}>
-                <div className="message-content">
-                  {msg.role === 'user' ? (
-                    <div className="user-message">
-                      <div className="message-avatar">You</div>
-                      <div className="message-text">{msg.content}</div>
-                    </div>
-                  ) : (
-                    <div className="assistant-message">
-                      <div className="message-avatar">AI</div>
-                      <div className="message-text">
-                        <div className="formatted-content">
-                          {formatResponse(msg.content)}
-                        </div>
-                        {msg.steps && msg.steps.length > 0 && (
-                          <details className="steps-details">
-                            <summary>View {msg.steps.length} tool call{msg.steps.length > 1 ? 's' : ''}</summary>
-                            {msg.steps.map((step, i) => (
-                              <div key={i} className="step-item">
-                                <div className="step-header">
-                                  <span className="step-number">Step {i + 1}</span>
-                                  <span className="step-tool">🔧 {step.tool}</span>
-                                </div>
-                                <div className="step-input">
-                                  <strong>Input:</strong>
-                                  <pre>{JSON.stringify(step.tool_input, null, 2)}</pre>
-                                </div>
-                                <div className="step-observation">
-                                  <strong>Result:</strong>
-                                  <div className="observation-content">{parseMarkdown(step.observation)}</div>
-                                </div>
-                              </div>
-                            ))}
-                          </details>
-                        )}
-                        {msg.approval_required && msg.approval_id && (
-                          <div className="approval-card">
-                            <div className="approval-message">
-                              <strong>Approval required:</strong> {msg.approval_message || 'Confirmation needed before delete'}
-                            </div>
-                            <button
-                              className="approve-button"
-                              onClick={() => approveDeletion(msg.approval_id)}
-                            >
-                              Approve deletion
-                            </button>
-                          </div>
-                        )}
-                        {msg.duration && (
-                          <div className="duration">⏱️ {msg.duration}ms</div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-            {loading && (
-              <div className="message assistant">
-                <div className="message-content">
-                  <div className="assistant-message">
-                    <div className="message-avatar">AI</div>
-                    <div className="message-text loading-dots">
-                      <span></span><span></span><span></span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-        )}
-      </main>
-
-      {/* Input Area */}
-      <footer className="input-area">
-        <form onSubmit={sendMessage} className="input-form">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask me anything... (S3, CloudWatch, Resource Management, etc.)"
-            disabled={loading}
-            className="message-input"
-          />
-          <button type="submit" disabled={loading || !input.trim()} className="send-button">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </button>
-        </form>
-      </footer>
+        </footer>
+      </div>
     </div>
   )
 }
