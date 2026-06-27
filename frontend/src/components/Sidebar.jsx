@@ -5,6 +5,7 @@ export function Sidebar({
   onSelectSession,
   collapsed,
   onToggleCollapse,
+  userEmail,
 }) {
   const groupSessions = (items) => {
     const sorted = [...items].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
@@ -102,7 +103,7 @@ export function Sidebar({
         <div className="border-t border-slate-800/80 p-4">
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
             <p className="text-sm font-medium text-slate-200">Signed in</p>
-            <p className="mt-1 text-xs text-slate-400">admin@aws-agent.local</p>
+            <p className="mt-1 text-xs text-slate-400">{userEmail || 'Unknown user'}</p>
           </div>
         </div>
       )}

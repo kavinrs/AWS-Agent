@@ -1,4 +1,4 @@
-export function Header({ darkMode, onToggleDarkMode, connectionStatus, userName }) {
+export function Header({ darkMode, onToggleDarkMode, connectionStatus, userName, onLogout }) {
   return (
     <header className="flex items-center justify-between border-b border-slate-800/80 bg-slate-950/80 px-4 py-3 backdrop-blur sm:px-6">
       <div className="flex items-center gap-3">
@@ -9,7 +9,7 @@ export function Header({ darkMode, onToggleDarkMode, connectionStatus, userName 
           </svg>
         </div>
         <div>
-          <p className="text-sm font-semibold text-white">AWS AI Cloud Assistant</p>
+          <p className="text-sm font-semibold text-white">AWS Agent</p>
           <p className="text-xs text-slate-400">Connected Region • us-east-1</p>
         </div>
       </div>
@@ -24,6 +24,14 @@ export function Header({ darkMode, onToggleDarkMode, connectionStatus, userName 
           <span className="h-2 w-2 rounded-full bg-cyan-400" />
           {userName}
         </div>
+
+        <button
+          type="button"
+          onClick={onLogout}
+          className="hidden rounded-full border border-rose-600 bg-rose-600/10 px-3 py-1.5 text-sm text-rose-200 transition hover:bg-rose-600/20 sm:inline-flex"
+        >
+          Logout
+        </button>
 
         <button
           type="button"

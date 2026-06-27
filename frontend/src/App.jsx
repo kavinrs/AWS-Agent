@@ -4,10 +4,19 @@ import { ChatWindow } from './components/ChatWindow'
 import { Header } from './components/Header'
 import { Sidebar } from './components/Sidebar'
 import { WelcomeScreen } from './components/WelcomeScreen'
+import { AuthPage } from './components/AuthPage'
 
 const API_URL = 'http://localhost:8000'
-const STORAGE_KEY_SESSIONS = 'aws-agent-sessions'
-const STORAGE_KEY_ACTIVE_SESSION = 'aws-agent-active-session'
+const STORAGE_KEY_USERS = 'aws-agent-users'
+const STORAGE_KEY_CURRENT_USER = 'aws-agent-current-user'
+
+function userStorageKey(email) {
+  return `aws-agent-sessions-${email}`
+}
+
+function activeSessionStorageKey(email) {
+  return `aws-agent-active-session-${email}`
+}
 
 function createSession(messages = []) {
   const firstUserPrompt = messages.find((item) => item.role === 'user')?.content || 'New conversation'
@@ -21,9 +30,52 @@ function createSession(messages = []) {
   }
 }
 
-function loadStoredSessions() {
+function loadStoredUsers() {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY_SESSIONS)
+    const raw = window.localStorage.getItem(STORAGE_KEY_USERS)
+    return raw ? JSON.parse(raw) : {}
+  } catch (error) {
+    console.error('Failed to load users from storage:', error)
+    return {}
+  }
+}
+
+function saveStoredUsers(users) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(users))
+  } catch (error) {
+    console.error('Failed to save users to storage:', error)
+  }
+}
+
+function loadStoredCurrentUser() {
+  try {
+    return window.localStorage.getItem(STORAGE_KEY_CURRENT_USER)
+  } catch (error) {
+    console.error('Failed to load current user from storage:', error)
+    return null
+  }
+}
+
+function saveCurrentUser(email) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY_CURRENT_USER, email)
+  } catch (error) {
+    console.error('Failed to save current user to storage:', error)
+  }
+}
+
+function clearCurrentUser() {
+  try {
+    window.localStorage.removeItem(STORAGE_KEY_CURRENT_USER)
+  } catch (error) {
+    console.error('Failed to clear current user from storage:', error)
+  }
+}
+
+function loadStoredSessions(email) {
+  try {
+    const raw = window.localStorage.getItem(userStorageKey(email))
     if (!raw) return null
     return JSON.parse(raw)
   } catch (error) {
@@ -32,12 +84,28 @@ function loadStoredSessions() {
   }
 }
 
-function loadStoredActiveSessionId() {
+function loadStoredActiveSessionId(email) {
   try {
-    return window.localStorage.getItem(STORAGE_KEY_ACTIVE_SESSION)
+    return window.localStorage.getItem(activeSessionStorageKey(email))
   } catch (error) {
     console.error('Failed to load active session id from storage:', error)
     return null
+  }
+}
+
+function saveSessions(email, sessions) {
+  try {
+    window.localStorage.setItem(userStorageKey(email), JSON.stringify(sessions))
+  } catch (error) {
+    console.error('Failed to save sessions to storage:', error)
+  }
+}
+
+function saveActiveSessionId(email, sessionId) {
+  try {
+    window.localStorage.setItem(activeSessionStorageKey(email), sessionId)
+  } catch (error) {
+    console.error('Failed to save active session id to storage:', error)
   }
 }
 
@@ -51,6 +119,8 @@ function App() {
   const [darkMode, setDarkMode] = useState(true)
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState(null)
+  const [currentUser, setCurrentUser] = useState(null)
+  const [authError, setAuthError] = useState('')
   const messagesEndRef = useRef(null)
 
   useEffect(() => {
@@ -61,8 +131,14 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const storedSessions = loadStoredSessions()
-    const storedActiveSessionId = loadStoredActiveSessionId()
+    const email = loadStoredCurrentUser()
+    if (!email) {
+      return
+    }
+
+    setCurrentUser(email)
+    const storedSessions = loadStoredSessions(email)
+    const storedActiveSessionId = loadStoredActiveSessionId(email)
 
     if (storedSessions?.length > 0) {
       setSessions(storedSessions)
@@ -86,15 +162,11 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!activeSessionId) return
+    if (!activeSessionId || !currentUser) return
 
-    try {
-      window.localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(sessions))
-      window.localStorage.setItem(STORAGE_KEY_ACTIVE_SESSION, activeSessionId)
-    } catch (error) {
-      console.error('Failed to save sessions to storage:', error)
-    }
-  }, [sessions, activeSessionId])
+    saveSessions(currentUser, sessions)
+    saveActiveSessionId(currentUser, activeSessionId)
+  }, [sessions, activeSessionId, currentUser])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -199,6 +271,69 @@ function App() {
     }
   }
 
+  const handleRegister = (email, password) => {
+    const users = loadStoredUsers()
+    if (users[email]) {
+      setAuthError('This email is already registered.')
+      return
+    }
+
+    users[email] = { password }
+    saveStoredUsers(users)
+    setAuthError('')
+    setCurrentUser(email)
+    saveCurrentUser(email)
+
+    const initialSession = createSession([])
+    setSessions([initialSession])
+    setActiveSessionId(initialSession.id)
+    setMessages([])
+  }
+
+  const handleLogin = (email, password) => {
+    const users = loadStoredUsers()
+    if (!users[email] || users[email].password !== password) {
+      setAuthError('Invalid email or password.')
+      return
+    }
+
+    setAuthError('')
+    setCurrentUser(email)
+    saveCurrentUser(email)
+
+    const storedSessions = loadStoredSessions(email)
+    const storedActiveSessionId = loadStoredActiveSessionId(email)
+
+    if (storedSessions?.length > 0) {
+      setSessions(storedSessions)
+      if (storedActiveSessionId && storedSessions.some((session) => session.id === storedActiveSessionId)) {
+        setActiveSessionId(storedActiveSessionId)
+        const selectedSession = storedSessions.find((session) => session.id === storedActiveSessionId)
+        setMessages(selectedSession?.messages || [])
+        return
+      }
+
+      const firstSession = storedSessions[0]
+      setActiveSessionId(firstSession.id)
+      setMessages(firstSession.messages || [])
+      return
+    }
+
+    const initialSession = createSession([])
+    setSessions([initialSession])
+    setActiveSessionId(initialSession.id)
+    setMessages([])
+  }
+
+  const handleLogout = () => {
+    clearCurrentUser()
+    setCurrentUser(null)
+    setSessions([])
+    setActiveSessionId(null)
+    setMessages([])
+    setInput('')
+  }
+
   const approveDeletion = async (approvalId) => {
     try {
       const response = await fetch(`${API_URL}/approve/${approvalId}`, { method: 'POST' })
@@ -231,6 +366,10 @@ function App() {
 
   const orderedSessions = useMemo(() => [...sessions].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)), [sessions])
 
+  if (!currentUser) {
+    return <AuthPage onLogin={handleLogin} onRegister={handleRegister} errorMessage={authError} />
+  }
+
   return (
     <div className={`flex min-h-screen flex-col bg-slate-950 text-slate-100 lg:flex-row ${darkMode ? '' : 'bg-stone-50 text-stone-900'}`}>
       <Sidebar
@@ -240,6 +379,7 @@ function App() {
         onSelectSession={handleSelectSession}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((value) => !value)}
+        userEmail={currentUser}
       />
 
       <div className="flex min-h-screen flex-1 flex-col">
@@ -247,7 +387,8 @@ function App() {
           darkMode={darkMode}
           onToggleDarkMode={() => setDarkMode((value) => !value)}
           connectionStatus="Online"
-          userName="admin"
+          userName={currentUser}
+          onLogout={handleLogout}
         />
 
         <main className="flex-1 overflow-hidden">
