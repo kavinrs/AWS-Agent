@@ -4,16 +4,17 @@ FastAPI server — exposes the AWS Agent via REST API.
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import os
 import time
 import json
 
-from LangChainAgent.agent.aws_agent import CustomAgentExecuter
-from LangChainAgent.rag.retriever import get_or_create_retriever
-from langchain_core.messages import HumanMessage, AIMessage
+from backend.app.agents.aws_agent import CustomAgentExecuter
+from backend.app.rag.retriever import get_or_create_retriever, rebuild_knowledge_base
+from backend.app.tools import ALL_TOOLS
+from backend.app.tools.tools import execute_aws_cloud_control
 
 
 app = FastAPI(
@@ -94,6 +95,23 @@ class ApprovalRequest(BaseModel):
     status: str
     created_at: str
     message: str
+
+
+class AdminRebuildRequest(BaseModel):
+    s3_bucket: Optional[str] = None
+    s3_prefix: str = Field(
+        default="company-documents/",
+        description="S3 prefix where company PDF documents are stored.",
+    )
+
+
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "admin-secret")
+
+
+def verify_admin_api_key(x_admin_api_key: str = Header(..., alias="x-admin-api-key")):
+    if x_admin_api_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized admin API key.")
+    return x_admin_api_key
 
 
 def format_observation(obs_str: str) -> str:
@@ -178,6 +196,39 @@ def root():
 def health():
     return {"status": "healthy"}
 
+
+@app.post(
+    "/admin/rebuild-knowledge-base",
+    tags=["Admin"],
+    dependencies=[Depends(verify_admin_api_key)],
+)
+def admin_rebuild_knowledge_base_endpoint(request: AdminRebuildRequest):
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
+
+    bucket = request.s3_bucket or os.getenv("COMPANY_DOCS_BUCKET")
+    prefix = request.s3_prefix or os.getenv("COMPANY_DOCS_PREFIX", "company-documents/")
+    if not bucket:
+        raise HTTPException(
+            status_code=400,
+            detail="S3 bucket is required. Provide s3_bucket in the request or set COMPANY_DOCS_BUCKET.",
+        )
+
+    try:
+        _, document_count = rebuild_knowledge_base(openai_api_key, bucket, prefix)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Knowledge base rebuild failed: {exc}")
+
+    return {
+        "status": "success",
+        "message": "Knowledge base rebuilt from S3 and FAISS index updated.",
+        "bucket": bucket,
+        "prefix": prefix,
+        "documents_loaded": document_count,
+    }
+
+
 approval_requests: Dict[str, ApprovalRequest] = {}
 
 
@@ -209,7 +260,6 @@ def _find_pending_approval(request_text: str) -> Optional[ApprovalRequest]:
 @app.get("/tools", tags=["Agent"])
 def list_tools():
     """Return all available agent tools and their descriptions."""
-    from LangChainAgent.tools import ALL_TOOLS
     return {
         "tools": [
             {"name": t.name, "description": t.description}
@@ -231,8 +281,6 @@ def chat(request: ChatRequest):
     start = time.time()
     pending_request = _find_pending_approval(request.message)
     if pending_request is not None:
-        from LangChainAgent.tools.tools import execute_aws_cloud_control
-
         approved_tool_input = pending_request.tool_input
         if not isinstance(approved_tool_input, dict):
             try:
@@ -327,8 +375,6 @@ def approve(approval_id: str):
 
     if request_record.status != "pending":
         raise HTTPException(status_code=400, detail=f"Approval request is already {request_record.status}.")
-
-    from LangChainAgent.tools.tools import execute_aws_cloud_control
 
     approved_tool_input = request_record.tool_input
     if not isinstance(approved_tool_input, dict):
