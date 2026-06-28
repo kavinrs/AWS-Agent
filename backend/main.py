@@ -3,7 +3,7 @@ Main entrypoint — run with:  python main.py
 Or with uvicorn:             uvicorn main:app --reload --port 8000
 """
 import uvicorn
-from api.app import app
+from app.api.app import app
 
 if __name__ == "__main__":
     uvicorn.run(

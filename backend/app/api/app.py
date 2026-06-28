@@ -3,7 +3,9 @@ FastAPI server — exposes the AWS Agent via REST API.
 """
 from datetime import datetime
 from typing import Any, Dict, Optional
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -11,10 +13,21 @@ import os
 import time
 import json
 
-from backend.app.agents.aws_agent import CustomAgentExecuter
-from backend.app.rag.retriever import get_or_create_retriever, rebuild_knowledge_base
-from backend.app.tools import ALL_TOOLS
-from backend.app.tools.tools import execute_aws_cloud_control
+# Load environment variables from a .env file in the backend root or parent folders
+env_path = None
+for parent in Path(__file__).resolve().parents:
+    candidate = parent / ".env"
+    if candidate.exists():
+        env_path = candidate
+        break
+
+if env_path is not None:
+    load_dotenv(dotenv_path=env_path)
+
+from app.agents.aws_agent import CustomAgentExecuter
+from app.rag.retriever import get_or_create_retriever, rebuild_knowledge_base
+from app.tools import ALL_TOOLS
+from app.tools.tools import execute_aws_cloud_control
 
 
 app = FastAPI(

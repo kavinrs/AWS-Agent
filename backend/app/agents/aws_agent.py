@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, ToolMessage, HumanMessage, AIMessage
-from backend.app.tools import ALL_TOOLS
-from backend.app.rag.retriever import retrieve_company_context
+from app.tools import ALL_TOOLS
+from app.rag.retriever import retrieve_company_context
 from langchain_core.runnables import RunnableSerializable
 import json
 

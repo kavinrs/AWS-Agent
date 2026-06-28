@@ -1,7 +1,7 @@
 import boto3
 from botocore.exceptions import ClientError
 from pathlib import Path
-from langchain.document_loaders import PyPDFLoader
+from pypdf import PdfReader
 
 
 def download_company_pdfs_from_s3(bucket_name: str, prefix: str, download_dir: str) -> int:
@@ -65,11 +65,21 @@ def load_company_pdfs(doc_dir: str) -> list[dict]:
     docs = []
     folder = Path(doc_dir)
     for pdf_path in sorted(folder.glob("*.pdf")):
-        loader = PyPDFLoader(str(pdf_path))
-        pages = loader.load()
-        for page in pages:
-            docs.append({
-                "page_content": page.page_content,
-                "metadata": {"source": str(pdf_path.name)},
-            })
+        reader = PdfReader(str(pdf_path))
+        text = []
+        for page in reader.pages:
+            try:
+                page_text = page.extract_text() or ""
+            except Exception:
+                page_text = ""
+            if page_text:
+                text.append(page_text)
+
+        if not text:
+            continue
+
+        docs.append({
+            "page_content": "\n\n".join(text),
+            "metadata": {"source": str(pdf_path.name)},
+        })
     return docs

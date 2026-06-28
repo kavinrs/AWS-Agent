@@ -4,7 +4,7 @@ from typing import List
 from .loader import download_company_pdfs_from_s3, load_company_pdfs
 from .vector_store import build_faiss_index, load_faiss_index, INDEX_FILE
 
-LOCAL_COMPANY_DOCS_DIR = Path(__file__).resolve().parents[1] / "knowledge" / "company_docs"
+LOCAL_COMPANY_DOCS_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "company_docs"
 DEFAULT_S3_COMPANY_DOCS_PREFIX = "company-documents/"
 
 
