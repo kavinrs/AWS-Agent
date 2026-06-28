@@ -6,7 +6,7 @@ import { Sidebar } from './components/Sidebar'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { AuthPage } from './components/AuthPage'
 
-const API_URL = 'http://localhost:8000'
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const STORAGE_KEY_USERS = 'aws-agent-users'
 const STORAGE_KEY_CURRENT_USER = 'aws-agent-current-user'
 
