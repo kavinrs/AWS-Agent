@@ -7,16 +7,8 @@ import { WelcomeScreen } from './components/WelcomeScreen'
 import { AuthPage } from './components/AuthPage'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-const STORAGE_KEY_USERS = 'aws-agent-users'
 const STORAGE_KEY_CURRENT_USER = 'aws-agent-current-user'
-
-function userStorageKey(email) {
-  return `aws-agent-sessions-${email}`
-}
-
-function activeSessionStorageKey(email) {
-  return `aws-agent-active-session-${email}`
-}
+const STORAGE_KEY_AUTH_TOKEN = 'aws-agent-auth-token'
 
 function createSession(messages = []) {
   const firstUserPrompt = messages.find((item) => item.role === 'user')?.content || 'New conversation'
@@ -30,22 +22,20 @@ function createSession(messages = []) {
   }
 }
 
-function loadStoredUsers() {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY_USERS)
-    return raw ? JSON.parse(raw) : {}
-  } catch (error) {
-    console.error('Failed to load users from storage:', error)
-    return {}
-  }
-}
+function getSessionTitle(messages = [], existingTitle = 'New conversation') {
+  const trimmedExistingTitle = existingTitle?.trim()
+  const hasMeaningfulTitle = Boolean(trimmedExistingTitle && trimmedExistingTitle !== 'New conversation')
 
-function saveStoredUsers(users) {
-  try {
-    window.localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(users))
-  } catch (error) {
-    console.error('Failed to save users to storage:', error)
+  if (hasMeaningfulTitle) {
+    return trimmedExistingTitle
   }
+
+  const firstUserPrompt = messages.find((item) => item.role === 'user')?.content?.trim()
+  if (!firstUserPrompt) {
+    return 'New conversation'
+  }
+
+  return firstUserPrompt.replace(/\s+/g, ' ').slice(0, 40)
 }
 
 function loadStoredCurrentUser() {
@@ -73,39 +63,28 @@ function clearCurrentUser() {
   }
 }
 
-function loadStoredSessions(email) {
+function loadStoredToken() {
   try {
-    const raw = window.localStorage.getItem(userStorageKey(email))
-    if (!raw) return null
-    return JSON.parse(raw)
+    return window.localStorage.getItem(STORAGE_KEY_AUTH_TOKEN)
   } catch (error) {
-    console.error('Failed to load sessions from storage:', error)
+    console.error('Failed to load auth token from storage:', error)
     return null
   }
 }
 
-function loadStoredActiveSessionId(email) {
+function saveStoredToken(token) {
   try {
-    return window.localStorage.getItem(activeSessionStorageKey(email))
+    window.localStorage.setItem(STORAGE_KEY_AUTH_TOKEN, token)
   } catch (error) {
-    console.error('Failed to load active session id from storage:', error)
-    return null
+    console.error('Failed to save auth token to storage:', error)
   }
 }
 
-function saveSessions(email, sessions) {
+function clearStoredToken() {
   try {
-    window.localStorage.setItem(userStorageKey(email), JSON.stringify(sessions))
+    window.localStorage.removeItem(STORAGE_KEY_AUTH_TOKEN)
   } catch (error) {
-    console.error('Failed to save sessions to storage:', error)
-  }
-}
-
-function saveActiveSessionId(email, sessionId) {
-  try {
-    window.localStorage.setItem(activeSessionStorageKey(email), sessionId)
-  } catch (error) {
-    console.error('Failed to save active session id to storage:', error)
+    console.error('Failed to clear auth token from storage:', error)
   }
 }
 
@@ -120,6 +99,7 @@ function App() {
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState(null)
   const [currentUser, setCurrentUser] = useState(null)
+  const [authToken, setAuthToken] = useState(null)
   const [authError, setAuthError] = useState('')
   const messagesEndRef = useRef(null)
 
@@ -132,48 +112,48 @@ function App() {
 
   useEffect(() => {
     const email = loadStoredCurrentUser()
-    if (!email) {
+    const token = loadStoredToken()
+    if (!email || !token) {
       return
     }
 
     setCurrentUser(email)
-    const storedSessions = loadStoredSessions(email)
-    const storedActiveSessionId = loadStoredActiveSessionId(email)
+    setAuthToken(token)
 
-    if (storedSessions?.length > 0) {
-      setSessions(storedSessions)
-      if (storedActiveSessionId && storedSessions.some((session) => session.id === storedActiveSessionId)) {
-        setActiveSessionId(storedActiveSessionId)
-        const selectedSession = storedSessions.find((session) => session.id === storedActiveSessionId)
-        setMessages(selectedSession?.messages || [])
-        return
+    const fetchSessions = async () => {
+      try {
+        const response = await fetch(`${API_URL}/sessions`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+        if (!response.ok) {
+          throw new Error(`Failed to load sessions: ${response.status}`)
+        }
+
+        const data = await response.json()
+        if (data.sessions?.length > 0) {
+          setSessions(data.sessions)
+          setActiveSessionId(data.sessions[0].id)
+          setMessages(data.sessions[0].messages || [])
+          return
+        }
+      } catch (error) {
+        console.error(error)
       }
-
-      const firstSession = storedSessions[0]
-      setActiveSessionId(firstSession.id)
-      setMessages(firstSession.messages || [])
-      return
     }
 
-    const initialSession = createSession([])
-    setSessions([initialSession])
-    setActiveSessionId(initialSession.id)
-    setMessages([])
+    fetchSessions()
   }, [])
-
-  useEffect(() => {
-    if (!activeSessionId || !currentUser) return
-
-    saveSessions(currentUser, sessions)
-    saveActiveSessionId(currentUser, activeSessionId)
-  }, [sessions, activeSessionId, currentUser])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
 
-  const persistSession = (nextMessages, titleOverride) => {
-    if (!activeSessionId) return
+  const persistSession = async (nextMessages, titleOverride) => {
+    if (!activeSessionId || !authToken) return
+
+    const nextTitle = titleOverride || 'New conversation'
 
     setSessions((prev) =>
       prev.map((session) =>
@@ -187,11 +167,24 @@ function App() {
           : session,
       ),
     )
+
+    try {
+      await fetch(`${API_URL}/sessions/${activeSessionId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ title: nextTitle, messages: nextMessages }),
+      })
+    } catch (error) {
+      console.error('Failed to persist session:', error)
+    }
   }
 
-  const handleNewChat = () => {
+  const handleNewChat = async () => {
     if (activeSessionId) {
-      persistSession(messages)
+      await persistSession(messages)
     }
 
     const freshSession = createSession([])
@@ -199,6 +192,27 @@ function App() {
     setActiveSessionId(freshSession.id)
     setMessages([])
     setInput('')
+
+    if (!authToken) return
+
+    try {
+      const response = await fetch(`${API_URL}/sessions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ title: freshSession.title, messages: freshSession.messages }),
+      })
+
+      if (response.ok) {
+        const sessionData = await response.json()
+        setSessions((prev) => [sessionData, ...prev.filter((session) => session.id !== sessionData.id)])
+        setActiveSessionId(sessionData.id)
+      }
+    } catch (error) {
+      console.error('Failed to create session:', error)
+    }
   }
 
   const handleSelectSession = (sessionId) => {
@@ -234,7 +248,10 @@ function App() {
 
       const response = await fetch(`${API_URL}/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({ message: userMessage, chat_history: chatHistory }),
       })
 
@@ -256,7 +273,7 @@ function App() {
 
       const nextMessages = [...optimisticMessages, assistantMessage]
       setMessages(nextMessages)
-      persistSession(nextMessages)
+      await persistSession(nextMessages, userMessage.slice(0, 40))
     } catch (error) {
       const fallbackMessage = {
         role: 'assistant',
@@ -265,69 +282,75 @@ function App() {
       }
       const nextMessages = [...optimisticMessages, fallbackMessage]
       setMessages(nextMessages)
-      persistSession(nextMessages)
+      await persistSession(nextMessages)
     } finally {
       setLoading(false)
     }
   }
 
-  const handleRegister = (email, password) => {
-    const users = loadStoredUsers()
-    if (users[email]) {
-      setAuthError('This email is already registered.')
-      return
-    }
+  const handleRegister = async (email, password) => {
+    try {
+      const response = await fetch(`${API_URL}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
 
-    users[email] = { password }
-    saveStoredUsers(users)
-    setAuthError('')
-    setCurrentUser(email)
-    saveCurrentUser(email)
-
-    const initialSession = createSession([])
-    setSessions([initialSession])
-    setActiveSessionId(initialSession.id)
-    setMessages([])
-  }
-
-  const handleLogin = (email, password) => {
-    const users = loadStoredUsers()
-    if (!users[email] || users[email].password !== password) {
-      setAuthError('Invalid email or password.')
-      return
-    }
-
-    setAuthError('')
-    setCurrentUser(email)
-    saveCurrentUser(email)
-
-    const storedSessions = loadStoredSessions(email)
-    const storedActiveSessionId = loadStoredActiveSessionId(email)
-
-    if (storedSessions?.length > 0) {
-      setSessions(storedSessions)
-      if (storedActiveSessionId && storedSessions.some((session) => session.id === storedActiveSessionId)) {
-        setActiveSessionId(storedActiveSessionId)
-        const selectedSession = storedSessions.find((session) => session.id === storedActiveSessionId)
-        setMessages(selectedSession?.messages || [])
+      if (!response.ok) {
+        const error = await response.json()
+        setAuthError(error.detail || 'Registration failed.')
         return
       }
 
-      const firstSession = storedSessions[0]
-      setActiveSessionId(firstSession.id)
-      setMessages(firstSession.messages || [])
-      return
+      const data = await response.json()
+      setAuthError('')
+      setCurrentUser(data.email)
+      setAuthToken(data.token)
+      saveCurrentUser(data.email)
+      saveStoredToken(data.token)
+      setSessions(data.sessions)
+      setActiveSessionId(data.activeSessionId)
+      setMessages(data.sessions[0]?.messages || [])
+    } catch (error) {
+      setAuthError('Registration failed.')
+      console.error(error)
     }
+  }
 
-    const initialSession = createSession([])
-    setSessions([initialSession])
-    setActiveSessionId(initialSession.id)
-    setMessages([])
+  const handleLogin = async (email, password) => {
+    try {
+      const response = await fetch(`${API_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        setAuthError(error.detail || 'Login failed.')
+        return
+      }
+
+      const data = await response.json()
+      setAuthError('')
+      setCurrentUser(data.email)
+      setAuthToken(data.token)
+      saveCurrentUser(data.email)
+      saveStoredToken(data.token)
+      setSessions(data.sessions)
+      setActiveSessionId(data.activeSessionId)
+      setMessages(data.sessions[0]?.messages || [])
+    } catch (error) {
+      setAuthError('Login failed.')
+      console.error(error)
+    }
   }
 
   const handleLogout = () => {
     clearCurrentUser()
+    clearStoredToken()
     setCurrentUser(null)
+    setAuthToken(null)
     setSessions([])
     setActiveSessionId(null)
     setMessages([])
@@ -336,7 +359,12 @@ function App() {
 
   const approveDeletion = async (approvalId) => {
     try {
-      const response = await fetch(`${API_URL}/approve/${approvalId}`, { method: 'POST' })
+      const response = await fetch(`${API_URL}/approve/${approvalId}`, {
+        method: 'POST',
+        headers: {
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+      })
 
       if (!response.ok) {
         const errText = await response.text()

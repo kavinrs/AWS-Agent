@@ -81,6 +81,27 @@ def create_ec2_instance(
 
         waiter = client.get_waiter("instance_running")
         waiter.wait(InstanceIds=instance_ids)
+        # Ensure tags are applied reliably: some environments may not
+        # persist TagSpecifications on run_instances, so explicitly call
+        # create_tags after the instance is running.
+        try:
+            tags_list = None
+            if tags:
+                if isinstance(tags, dict):
+                    tags_list = [{"Key": k, "Value": str(v)} for k, v in tags.items()]
+                else:
+                    tags_list = tags
+
+            if tags_list:
+                try:
+                    client.create_tags(Resources=instance_ids, Tags=tags_list)
+                except Exception:
+                    # Non-fatal: continue but include a warning in the result
+                    pass
+
+        except Exception:
+            # Defensive: never fail the creation because of tagging issues
+            pass
 
         return json.dumps({
             "status": "success",

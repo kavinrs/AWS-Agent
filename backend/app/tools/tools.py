@@ -8,6 +8,7 @@ Three powerful tools:
 """
 
 import json
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -45,6 +46,106 @@ from .rds_tool import rds_tool
 def get_cc_client(region: str = "us-east-1"):
     """Create and return a CloudControl API client."""
     return boto3.client("cloudcontrol", region_name=region)
+
+
+def _title_label(key: str) -> str:
+    return " ".join(word.capitalize() for word in re.split(r"[_.]", str(key)))
+
+
+def _get_name_tag(properties: Optional[dict], identifier: str | None = None) -> str | None:
+    if not isinstance(properties, dict):
+        return identifier
+
+    tags = properties.get("Tags") or properties.get("tags")
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, dict) and str(tag.get("Key", "")).lower() == "name":
+                return str(tag.get("Value", ""))
+
+    if properties.get("Name"):
+        return str(properties.get("Name"))
+    if properties.get("BucketName"):
+        return str(properties.get("BucketName"))
+    if properties.get("DBInstanceIdentifier"):
+        return str(properties.get("DBInstanceIdentifier"))
+
+    return identifier
+
+
+def _simplify_ec2_properties(properties: dict, identifier: str | None = None) -> dict:
+    return {
+        "Name": _get_name_tag(properties, identifier),
+        "Instance ID": identifier,
+        "State": (properties.get("State") or {}).get("Name") if isinstance(properties.get("State"), dict) else properties.get("State"),
+        "Instance Type": properties.get("InstanceType"),
+        "Public IP": properties.get("PublicIpAddress") or properties.get("PublicIp") or properties.get("PublicIpAddresses"),
+        "Private IP": properties.get("PrivateIpAddress") or properties.get("PrivateIp"),
+        "Availability Zone": (properties.get("Placement") or {}).get("AvailabilityZone") if isinstance(properties.get("Placement"), dict) else properties.get("AvailabilityZone"),
+        "VPC": properties.get("VpcId"),
+        "Subnet": properties.get("SubnetId"),
+        "Security Groups": _extract_security_groups(properties),
+    }
+
+
+def _extract_security_groups(properties: dict) -> list[str] | str | None:
+    groups = properties.get("SecurityGroupIds") or properties.get("SecurityGroups")
+    if isinstance(groups, list) and groups:
+        simplified = []
+        for item in groups:
+            if isinstance(item, dict):
+                gid = item.get("GroupId") or item.get("GroupName")
+                if gid:
+                    simplified.append(str(gid))
+            elif isinstance(item, str):
+                simplified.append(item)
+        return simplified if len(simplified) > 1 else simplified[0] if simplified else None
+    return groups
+
+
+def _simplify_s3_properties(properties: dict, identifier: str | None = None) -> dict:
+    return {
+        "Name": _get_name_tag(properties, identifier),
+        "Bucket Name": properties.get("BucketName") or identifier,
+        "Region": properties.get("Region"),
+        "ARN": properties.get("Arn") or properties.get("ARN"),
+        "Creation Date": str(properties.get("CreationDate")) if properties.get("CreationDate") else None,
+    }
+
+
+def _simplify_rds_properties(properties: dict, identifier: str | None = None) -> dict:
+    return {
+        "Name": _get_name_tag(properties, identifier),
+        "DB Instance Identifier": properties.get("DBInstanceIdentifier") or identifier,
+        "Engine": properties.get("Engine"),
+        "DB Instance Class": properties.get("DBInstanceClass"),
+        "Allocated Storage": properties.get("AllocatedStorage"),
+        "Endpoint": (properties.get("Endpoint") or {}).get("Address") if isinstance(properties.get("Endpoint"), dict) else properties.get("Endpoint"),
+        "Status": properties.get("DBInstanceStatus"),
+        "VPC": properties.get("DBSubnetGroupName") or properties.get("VpcId"),
+    }
+
+
+def _simplify_generic_properties(properties: dict, identifier: str | None = None) -> dict:
+    simplified = {
+        "Name": _get_name_tag(properties, identifier),
+    }
+    for key, value in properties.items():
+        if key in {"Tags", "tags"}:
+            continue
+        simplified[_title_label(key)] = value
+    if identifier and "Identifier" not in simplified:
+        simplified["Identifier"] = identifier
+    return simplified
+
+
+def _simplify_properties(resource_type: str, properties: dict, identifier: str | None = None) -> dict:
+    if resource_type == "AWS::EC2::Instance":
+        return _simplify_ec2_properties(properties, identifier)
+    if resource_type == "AWS::S3::Bucket":
+        return _simplify_s3_properties(properties, identifier)
+    if resource_type == "AWS::RDS::DBInstance":
+        return _simplify_rds_properties(properties, identifier)
+    return _simplify_generic_properties(properties, identifier)
 
 
 def wait_for_progress(client, request_token: str, timeout: int = 60) -> dict:
@@ -161,13 +262,16 @@ def _aws_cloud_control_impl(
             resources = []
             for page in pages:
                 for r in page.get("ResourceDescriptions", []):
-                    entry = {"identifier": r["Identifier"]}
+                    identifier_value = r["Identifier"]
+                    properties = {}
                     if r.get("Properties"):
                         try:
-                            entry["properties"] = json.loads(r["Properties"])
+                            properties = json.loads(r["Properties"])
                         except json.JSONDecodeError:
-                            entry["properties"] = r["Properties"]
-                    resources.append(entry)
+                            properties = r["Properties"]
+
+                    simplified = _simplify_properties(resource_type, properties, identifier_value)
+                    resources.append({"identifier": identifier_value, "properties": simplified})
 
             return json.dumps({
                 "status": "success",
@@ -184,7 +288,14 @@ def _aws_cloud_control_impl(
 
             resp = client.get_resource(TypeName=resource_type, Identifier=identifier)
             desc = resp["ResourceDescription"]
-            props = json.loads(desc.get("Properties", "{}"))
+            props = {}
+            if desc.get("Properties"):
+                try:
+                    props = json.loads(desc.get("Properties", "{}"))
+                except json.JSONDecodeError:
+                    props = desc.get("Properties")
+
+            simplified = _simplify_properties(resource_type, props, identifier)
 
             return json.dumps({
                 "status": "success",
@@ -192,7 +303,7 @@ def _aws_cloud_control_impl(
                 "resource_type": resource_type,
                 "identifier": identifier,
                 "region": region,
-                "properties": props,
+                "properties": simplified,
             })
 
         elif operation == "create":
@@ -492,45 +603,32 @@ Actions: list_groups | get_logs""",
 
 
 class FinalAnswerInput(BaseModel):
-    """Input schema for Final Answer tool."""
-    answer: str = Field(
-        description="The final answer to provide to the user."
-    )
+    """Input schema for the agent's terminal response tool."""
+    answer: str = Field(description="The final response to return to the user")
 
 
 def _final_answer_impl(answer: str) -> str:
-    """
-    Return the final answer from the agent.
-
-    Called when the agent has completed its work and wants to provide the final response.
-
-    Args:
-        answer: The final answer string
-
-    Returns:
-        JSON string with the final answer
-    """
-    return json.dumps({
-        "status": "success",
-        "answer": answer,
-    })
+    return json.dumps({"status": "success", "answer": answer})
 
 
 final_answer = StructuredTool.from_function(
     func=_final_answer_impl,
     name="final_answer",
-    description="Provide the final answer to the user. Use when you have completed your task.",
+    description="Return the final response to the user after all required tools have completed.",
     args_schema=FinalAnswerInput,
 )
 
 
 ALL_TOOLS = [
     aws_cloud_control,
-    ec2_tool,
-    rds_tool,
     cloudwatch_logs,
     final_answer,
+    ec2_tool,
+    rds_tool,
 ]
 
-# Export helper for backend approval execution
+
 execute_aws_cloud_control = _aws_cloud_control_impl
+
+
+

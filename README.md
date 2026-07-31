@@ -90,11 +90,18 @@ LLM_PROVIDER=anthropic
 ### 3. Backend Setup
 
 ```bash
+# Create a Python virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
 # Install Python dependencies
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
+
+# Run SQLite migration to create the database schema
+python3 backend/migrate.py
 
 # Start the backend server
-python main.py
+python3 backend/main.py
 ```
 
 Backend server starts at **http://localhost:8000**

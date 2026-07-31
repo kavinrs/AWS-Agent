@@ -14,16 +14,32 @@ const normalizeLine = (line = '') =>
 const normalizeLabel = (label = '') => {
   const map = {
     'resource name': 'Resource Name',
+    'resource type': 'Resource Type',
     name: 'Resource Name',
     type: 'Resource Type',
-    'resource type': 'Resource Type',
     status: 'Status',
     arn: 'ARN',
     region: 'Region',
     'account id': 'Account ID',
+    'vpc id': 'VPC ID',
     vpc: 'VPC',
+    subnet: 'Subnet ID',
+    'subnet id': 'Subnet ID',
     endpoint: 'Endpoint',
     engine: 'Engine',
+    'bucket name': 'Bucket Name',
+    'db instance identifier': 'DB Instance Identifier',
+    'db instance class': 'DB Instance Class',
+    'allocated storage': 'Allocated Storage',
+    'security group': 'Security Group',
+    'security groups': 'Security Groups',
+    'private ip': 'Private IP',
+    'public ip': 'Public IP',
+    'availability zone': 'Availability Zone',
+    'instance id': 'Instance ID',
+    'instance type': 'Instance Type',
+    arn: 'ARN',
+    endpoint: 'Endpoint',
   }
   const normalized = label.trim().toLowerCase()
   return map[normalized] || label.replace(/\b\w/g, (char) => char.toUpperCase())
@@ -35,43 +51,59 @@ const parseResourceList = (text = '') => {
     .map((line) => normalizeLine(line))
     .filter((line) => line.length > 0)
 
-  const startIndexes = lines
-    .map((line, index) => ({ line, index }))
-    .filter(({ line }) => /resource name:/i.test(line))
-    .map(({ index }) => index)
+  const titleLine = text.match(/^(.*resources found.*)$/im)?.[1] || text.match(/^(.*instances.*)$/im)?.[1] || 'AWS Resources Found'
+  const summaryLine = text.match(/^(total:\s*\d+)/im)?.[1] || text.match(/^(count:\s*\d+)/im)?.[1] || ''
 
-  if (!startIndexes.length) {
-    return null
+  const resourceStartRegex = /^(resource(?:\s*\d+)?|resource name|name|instance id|identifier|db instance identifier|bucket name|security group|security groups|snapshot id|cluster identifier|cluster name|task definition|topic name|queue name|table name|vpc id|vpc|subnet id|availability zone|public ip|private ip)\b/i
+  const resourceLines = lines.filter((line) => !/^total:\s*\d+/i.test(line) && !/^count:\s*\d+/i.test(line) && !/^aws resources found/i.test(line) && !/^ec2 instances/i.test(line) && !/^rds instances/i.test(line) && !/^s3 buckets/i.test(line))
+
+  const resources = []
+  let current = []
+
+  resourceLines.forEach((line) => {
+    const isNewResource = /^(resource(?:\s*\d+)?|resource name|name|instance id|identifier|db instance identifier|bucket name)\b/i.test(line)
+
+    if (isNewResource && current.length > 0) {
+      resources.push(current)
+      current = []
+    }
+
+    current.push(line)
+  })
+
+  if (current.length > 0) {
+    resources.push(current)
   }
 
-  const titleLine = lines.find((line) => /resources found/i.test(line)) || 'AWS Resources Found'
-  const summaryLine = lines.find((line) => /total:\s*\d+/i.test(line)) || ''
+  const parsedResources = resources
+    .map((block) => {
+      const fields = {}
 
-  const resources = startIndexes.map((startIndex, index) => {
-    const endIndex = startIndexes[index + 1] || lines.length
-    const block = lines.slice(startIndex, endIndex)
-    const fields = {}
-
-    block.forEach((line) => {
-      line.split(/\s*-\s*/).forEach((segment) => {
-        const [rawLabel, ...rest] = segment.split(/:\s*/)
-        if (!rawLabel || !rest.length) return
-        const label = normalizeLabel(rawLabel)
-        const value = rest.join(': ').trim()
-        if (value) {
-          fields[label] = value
-        }
+      block.forEach((line) => {
+        line.split(/\s*-\s*/).forEach((segment) => {
+          const [rawLabel, ...rest] = segment.split(/:\s*/)
+          if (!rawLabel || !rest.length) return
+          const label = normalizeLabel(rawLabel)
+          const value = rest.join(': ').trim()
+          if (value) {
+            fields[label] = value
+          }
+        })
       })
-    })
 
-    return { id: `resource-${index}`, fields }
-  })
+      return Object.keys(fields).length >= 2 ? { fields } : null
+    })
+    .filter(Boolean)
+
+  if (!parsedResources.length) {
+    return null
+  }
 
   return {
     title: titleLine,
     summary: summaryLine,
-    count: resources.length,
-    resources,
+    count: parsedResources.length,
+    resources: parsedResources.map((resource, index) => ({ id: `resource-${index}`, fields: resource.fields })),
   }
 }
 

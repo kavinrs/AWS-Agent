@@ -1,16 +1,30 @@
-import json
 from pathlib import Path
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_aws import BedrockEmbeddings
 from langchain.vectorstores import FAISS
+import boto3
+
 
 
 INDEX_FILE = Path(__file__).parent / "company_faiss.index"
 
+bedrock_client = boto3.client(
+        service_name="bedrock-runtime",
+        region_name="us-east-1"      
+)
 
-def build_faiss_index(documents: list[dict], openai_api_key: str) -> FAISS:
+embeddings = BedrockEmbeddings(
+    client=bedrock_client,
+    model_id="amazon.titan-embed-text-v2:0"
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
+print("Building FAISS index...")
+
+def build_faiss_index(documents: list[dict]) -> FAISS:
     """Split documents, generate embeddings, and build a FAISS index."""
-    # Split text into manageable chunks for better retrieval quality.
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     texts = []
     metadatas = []
@@ -21,24 +35,32 @@ def build_faiss_index(documents: list[dict], openai_api_key: str) -> FAISS:
             texts.append(chunk)
             metadatas.append(doc["metadata"])
 
-    # Use OpenAI embeddings to convert text chunks into vectors.
-    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-    faiss_index = FAISS.from_texts(texts, embeddings, metadatas=metadatas)
 
-    # Save the index locally so it can be reused on app startup.
+    logger.info("Building FAISS index...")
+
+    faiss_index = FAISS.from_texts(texts, embeddings, metadatas=metadatas)
+    logger.info(f"FAISS index created with {len(texts)} chunks.")
+
     faiss_index.save_local(str(INDEX_FILE))
+    logger.info(f"FAISS index saved at {INDEX_FILE}")
+    print("FAISS index saved successfully.")
     return faiss_index
 
 
-def load_faiss_index(openai_api_key: str) -> FAISS | None:
+def load_faiss_index() -> FAISS | None:
     """Load the FAISS index from disk if it exists."""
     if INDEX_FILE.exists():
-        embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-        # This index is created locally from trusted company PDFs.
-        # Allowing deserialization is safe in this controlled project context.
-        return FAISS.load_local(
+        logger.info("Loading existing FAISS index...")
+
+        index = FAISS.load_local(
             str(INDEX_FILE),
             embeddings,
             allow_dangerous_deserialization=True,
         )
+
+        logger.info(f"Loaded FAISS index with {index.index.ntotal} vectors.")
+
+        return index
+
+    logger.warning("FAISS index not found.")
     return None
